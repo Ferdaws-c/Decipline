@@ -1,5 +1,7 @@
 # Decipline v1.0
 
+![Decipline Dashboard UI](assets/ui_preview.png)
+
 Welcome to **Decipline**, a clean, robust, and completely self-contained desktop application designed for people who love to follow structured schedules and Pomodoro work cycles.
 
 ## 🤖 A Note on AI
