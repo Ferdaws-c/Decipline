@@ -1,0 +1,19 @@
+Unhandled Exception:\nTraceback (most recent call last):
+  File "D:\antigravity Projects\Decipline\main.py", line 94, in <module>
+    main()
+    ~~~~^^
+  File "D:\antigravity Projects\Decipline\main.py", line 51, in main
+    from app.qt_window import MainWindow
+  File "D:\antigravity Projects\Decipline\app\qt_window.py", line 17, in <module>
+    from .scheduler import load_schedule, get_display_rows, advance_schedule
+ImportError: cannot import name 'advance_schedule' from 'app.scheduler' (D:\antigravity Projects\Decipline\app\scheduler.py)
+\nUnhandled Exception:\nTraceback (most recent call last):
+  File "D:\antigravity Projects\Decipline\main.py", line 94, in <module>
+    main()
+    ~~~~^^
+  File "D:\antigravity Projects\Decipline\main.py", line 51, in main
+    from app.qt_window import MainWindow
+  File "D:\antigravity Projects\Decipline\app\qt_window.py", line 20, in <module>
+    from .notifier import show_notification
+ImportError: cannot import name 'show_notification' from 'app.notifier' (D:\antigravity Projects\Decipline\app\notifier.py)
+\n
