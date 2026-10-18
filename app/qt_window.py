@@ -3,23 +3,26 @@ qt_window.py - PyQt6 Main Window for Decipline.
 Replaces the Tkinter/CustomTkinter implementation.
 """
 
-import sys
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QLabel, QPushButton, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView, QFrame, QSizePolicy
+    QLabel, QPushButton, QTableView,
+    QHeaderView, QAbstractItemView, QFrame, QTabWidget, QProgressBar, QStackedWidget, QApplication, QMessageBox
 )
-from PyQt6.QtCore import Qt, QPoint, pyqtSignal, QObject, QRectF, QTimer
-from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QPainterPath
+from PyQt6.QtCore import Qt, pyqtSignal, QObject
 
 from .qt_style import *
 from .pomodoro import PomodoroState, PomodoroTimer
 from .storage import (
-    load_schedule, get_display_rows, mark_task_completed, get_current_task_index
+    load_schedule, get_display_rows, mark_task_completed, get_current_task_index,
+    capture_schedule_target, complete_schedule_target
 )
 from .qt_library import LibraryDialog
 from .qt_task_detail import TaskDetailDialog
 from .notifier import show_notification
+from .qt_schedule_model import ScheduleTableModel
+from .qt_components import label, card, metric, prepare_table, scroll_page
+from .settings import get_experience_mode, load_settings, save_settings
+from .stats import get_courses
 
 class PomodoroSignals(QObject):
     """Safely routes background thread callbacks to the main Qt GUI thread."""
@@ -28,120 +31,68 @@ class PomodoroSignals(QObject):
     break_done = pyqtSignal()
     cycle_update = pyqtSignal(int)
     free_done = pyqtSignal()
-    task_completed = pyqtSignal()
-
-class TimerWidget(QWidget):
-    """Custom widget that draws the Pomodoro progress arc and text."""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedSize(240, 240)
-        self.fraction = 1.0
-        self.text_time = "25:00"
-        self.text_state = "Focus Time"
-        self.color_state = GREEN
-        self.cycle = 0
-        
-    def update_state(self, fraction, time_str, state_str, color, cycle=0):
-        self.fraction = fraction
-        self.text_time = time_str
-        self.text_state = state_str
-        self.color_state = color
-        self.cycle = cycle
-        self.update() # triggers paintEvent
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        rect = QRectF(10, 10, 220, 220)
-        
-        # Background track
-        pen_bg = QPen(QColor(BORDER))
-        pen_bg.setWidth(12)
-        pen_bg.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen_bg)
-        painter.drawArc(rect, 0, 360 * 16)
-        
-        # Foreground progress arc
-        pen_fg = QPen(QColor(self.color_state))
-        pen_fg.setWidth(12)
-        pen_fg.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen_fg)
-        
-        start_angle = 90 * 16
-        span_angle = int(-360 * self.fraction * 16)
-        painter.drawArc(rect, start_angle, span_angle)
-        
-        # Text
-        painter.setPen(QColor(TXT_PRI))
-        font_time = QFont(FONT_UI, 36, QFont.Weight.Bold)
-        painter.setFont(font_time)
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.text_time)
-        
-        painter.setPen(QColor(TXT_SEC))
-        font_state = QFont(FONT_UI, 12)
-        painter.setFont(font_state)
-        rect_state = QRectF(10, 140, 220, 30)
-        painter.drawText(rect_state, Qt.AlignmentFlag.AlignCenter, self.text_state)
-
-        # Draw 4 small cycle indicator circles at the bottom
-        circle_radius = 4
-        spacing = 12
-        total_width = (4 * circle_radius * 2) + (3 * spacing)
-        start_x = 10 + (220 - total_width) / 2
-        y = 180
-        painter.setPen(Qt.PenStyle.NoPen)
-        for i in range(4):
-            cx = start_x + i * (circle_radius * 2 + spacing)
-            if i < min(self.cycle + 1, 4):
-                painter.setBrush(QColor(GREEN))
-            else:
-                painter.setBrush(QColor(BORDER))
-            painter.drawEllipse(QPoint(int(cx + circle_radius), y), circle_radius, circle_radius)
+    focus_completed = pyqtSignal(str, object)
+    stats_saved = pyqtSignal(object)
 
 class CustomTitleBar(QFrame):
     def __init__(self, parent=None, title="Decipline"):
         super().__init__(parent)
         self.window = parent
         self.setObjectName("HeaderPanel")
-        self.setFixedHeight(50)
+        self.setFixedHeight(70)
         
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(16, 0, 16, 0)
-        
-        lbl_title = QLabel(title)
-        lbl_title.setFont(QFont(FONT_UI, 14, QFont.Weight.Bold))
+        self.header_layout = layout
+        layout.setContentsMargins(26, 0, 26, 0)
+        layout.setSpacing(12)
+
+        mark = QLabel("d.")
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mark.setFixedSize(36, 36)
+        mark.setStyleSheet(f"background: {ACCENT}; color: #191326; border-radius: 10px; font-size: 24px; font-weight: 700;")
+        layout.addWidget(mark)
+
+        lbl_title = QLabel("decipline")
+        self.brand_label = lbl_title
+        lbl_title.setStyleSheet("font-size: 18px; font-weight: 700; letter-spacing: -0.4px;")
         layout.addWidget(lbl_title)
         
-        lbl_sub = QLabel("Focus / Flow / Rest")
-        lbl_sub.setFont(QFont(FONT_UI, 12))
-        lbl_sub.setStyleSheet(f"color: {TXT_SEC};")
+        lbl_sub = label("Your space to make progress.")
+        self.subtitle_label = lbl_sub
         layout.addWidget(lbl_sub)
         
         layout.addStretch()
         
         from .stats import check_streak
         streak = check_streak()
-        lbl_streak = QLabel(f"🔥 {streak}")
-        lbl_streak.setFont(QFont(FONT_UI, 12, QFont.Weight.Bold))
-        if streak > 0:
-            lbl_streak.setStyleSheet(f"color: {AMBER};")
-        else:
-            lbl_streak.setStyleSheet(f"color: {TXT_SEC};")
+        lbl_streak = label(f"{streak} day streak", "Badge")
+        self.streak_label = lbl_streak
+        self.streak = streak
+        lbl_streak.setFixedHeight(30)
         layout.addWidget(lbl_streak)
+
+        self.mode_button = QPushButton("Expert mode")
+        self.mode_button.clicked.connect(self.window.toggle_experience_mode)
+        layout.addWidget(self.mode_button)
         
-        btn_settings = QPushButton("⚙️")
-        btn_settings.setFlat(True)
-        btn_settings.setFont(QFont(FONT_UI, 14))
-        btn_settings.setStyleSheet(f"color: {TXT_SEC}; background: transparent; border: none;")
+        btn_settings = QPushButton("Settings")
+        btn_settings.setObjectName("QuietButton")
         btn_settings.clicked.connect(self._open_settings)
         layout.addWidget(btn_settings)
         
         btn_hide = QPushButton("Hide to Tray")
-        btn_hide.setFlat(True)
-        btn_hide.setStyleSheet(f"color: {TXT_SEC}; background: transparent;")
+        self.hide_button = btn_hide
+        btn_hide.setObjectName("QuietButton")
+        btn_hide.setAccessibleName("Hide to tray")
         btn_hide.clicked.connect(self.window.hide_to_tray)
         layout.addWidget(btn_hide)
+        close_button = QPushButton("Close")
+        self.close_button = close_button
+        close_button.setObjectName("QuietButton")
+        close_button.setAccessibleName("Close app")
+        close_button.setToolTip("Save your progress and exit Decipline completely")
+        close_button.clicked.connect(self.window.close_app)
+        layout.addWidget(close_button)
         
         self._is_tracking = False
         self._start_pos = None
@@ -153,10 +104,34 @@ class CustomTitleBar(QFrame):
             # If settings changed, we might want to update the timer if it's IDLE
             if self.window.timer.state == PomodoroState.IDLE:
                 self.window.timer.reset()
+            self.window.apply_experience_mode()
+        dlg.deleteLater()
+
+    def set_basic(self, basic):
+        self.subtitle_label.hide()
+        self.brand_label.setVisible(not basic)
+        self.streak_label.setVisible(not basic)
+        self.setFixedHeight(52 if basic else 70)
+        self.header_layout.setContentsMargins(14 if basic else 26, 0, 14 if basic else 26, 0)
+        self.header_layout.setSpacing(6 if basic else 12)
+        self.hide_button.setText("Hide" if basic else "Hide to tray")
+        self.hide_button.setToolTip("Hide the window and keep the timer running. Click the tray icon to reopen.")
+        self.close_button.setText("×" if basic else "Close app")
+        destination = "Expert" if basic else "Basic"
+        self.mode_button.setText(f"{destination} mode")
+        self.mode_button.setAccessibleName(f"Switch to {destination} mode")
+        self.mode_button.setToolTip(f"Switch to {destination} mode. Your current timer keeps running.")
+        self.mode_button.setStyleSheet("padding: 6px 8px; font-size: 11px;" if basic else "")
+        for button in (self.hide_button, self.close_button):
+            button.setStyleSheet("padding: 6px; min-width: 22px;" if basic else "")
 
     # Native-feeling window drag without lagging the event queue
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            handle = self.window.windowHandle()
+            if handle and handle.startSystemMove():
+                event.accept()
+                return
             self._is_tracking = True
             self._start_pos = event.globalPosition().toPoint() - self.window.frameGeometry().topLeft()
             event.accept()
@@ -176,145 +151,265 @@ class MainWindow(QMainWindow):
     def __init__(self, on_hide=None):
         super().__init__()
         self._on_hide = on_hide
-        
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.resize(1000, 700)
-        self.setMinimumSize(900, 600)
-        
-        # Central widget wrapper for border radius
+        self.setWindowTitle("Decipline")
+        self.resize(1160, 820)
+        self.setMinimumSize(980, 720)
         self.central = QFrame()
-        self.central.setStyleSheet(f"QFrame {{ background-color: {BG}; border: 1px solid {BORDER}; border-radius: 12px; }}")
+        self.central.setObjectName("MainPanel")
+        self.central.setStyleSheet(f"QFrame#MainPanel {{ background: {BG}; border: 1px solid {BORDER}; }}")
         self.setCentralWidget(self.central)
-        
         main_layout = QVBoxLayout(self.central)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
-        
-        # Title Bar
         self.title_bar = CustomTitleBar(self)
         main_layout.addWidget(self.title_bar)
-        
-        # Content Area
-        content_layout = QHBoxLayout()
-        content_layout.setContentsMargins(16, 16, 16, 16)
-        content_layout.setSpacing(20)
-        main_layout.addLayout(content_layout)
-        
-        # ── Schedule Panel (Left) ──
-        schedule_panel = QVBoxLayout()
-        
-        lib_layout = QHBoxLayout()
-        self.lbl_schedule_title = QLabel("Daily Routine")
-        self.lbl_schedule_title.setFont(QFont(FONT_UI, 18, QFont.Weight.Bold))
-        lib_layout.addWidget(self.lbl_schedule_title)
-        
+        self.mode_tabs = QTabWidget()
+        self.mode_tabs.tabBar().hide()
+        self.workspace = QStackedWidget()
+        self.workspace.addWidget(self.mode_tabs)
+        main_layout.addWidget(self.workspace)
+        page = QWidget()
+        page.setObjectName("Page")
+        self.mode_tabs.addTab(scroll_page(page, minimum_height=590), "Scheduled routine")
+        root = QVBoxLayout(page)
+        root.setContentsMargins(22, 16, 22, 18)
+        root.setSpacing(12)
+        heading = QHBoxLayout()
+        titles = QVBoxLayout()
+        titles.setSpacing(4)
+        self.lbl_schedule_title = label("Daily Routine", "PageTitle")
+        self.lbl_schedule_title.setWordWrap(True)
+        self.lbl_schedule_title.setMaximumHeight(54)
+        self.lbl_schedule_title.setStyleSheet("font-size: 22px; font-weight: 600;")
+        titles.addWidget(self.lbl_schedule_title)
+        heading.addLayout(titles)
+        heading.addStretch()
+        for text, callback in (("Trends", self._open_trends), ("Schedule library", self._open_library)):
+            button = QPushButton(text)
+            button.clicked.connect(callback)
+            heading.addWidget(button)
+        root.addLayout(heading)
+
+        metrics = QHBoxLayout()
+        metrics.setSpacing(12)
+        for title, attr, color in (("PLANNED TASKS", "task_count_value", None),
+                                   ("COMPLETED", "completed_value", GREEN),
+                                   ("PROGRESS", "progress_value", ACCENT)):
+            frame, value = metric(title, "0", color)
+            setattr(self, attr, value)
+            metrics.addWidget(frame)
+
+        body = QHBoxLayout()
+        body.setSpacing(18)
+        schedule_card, schedule_layout = card()
+        section = QHBoxLayout()
+        section.addWidget(label("Today's plan", "SectionTitle"))
+        section.addStretch()
         from PyQt6.QtWidgets import QComboBox
         self.day_selector = QComboBox()
-        self.day_selector.setStyleSheet(f"background-color: {PANEL_BG}; color: {TXT_PRI}; border: 1px solid {BORDER}; padding: 4px; border-radius: 4px;")
+        self.day_selector.setMinimumWidth(120)
         self.day_selector.hide()
         self.day_selector.currentTextChanged.connect(self._on_day_changed)
-        lib_layout.addWidget(self.day_selector)
-        
-        lib_layout.addStretch()
-        
-        btn_trends = QPushButton("📈 Trends")
-        btn_trends.clicked.connect(self._open_trends)
-        lib_layout.addWidget(btn_trends)
-        
-        btn_lib = QPushButton("📚 Library")
-        btn_lib.clicked.connect(self._open_library)
-        lib_layout.addWidget(btn_lib)
-        
-        schedule_panel.addLayout(lib_layout)
-        
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["Time", "Task", "Duration", "Notes"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        self.table.setColumnWidth(0, 60)
-        self.table.setColumnWidth(2, 80)
-        self.table.verticalHeader().setVisible(False)
+        section.addWidget(self.day_selector)
+        schedule_layout.addLayout(section)
+        self.schedule_progress = QProgressBar()
+        self.schedule_progress.setTextVisible(False)
+        self.schedule_progress.setRange(0, 100)
+        schedule_layout.addWidget(self.schedule_progress)
+        self.table = QTableView()
+        self.table_model = ScheduleTableModel(self.table)
+        self.table.setModel(self.table_model)
+        prepare_table(self.table)
+        for column in (0, 2):
+            self.table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+        for column in (1, 3):
+            self.table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
+        self.table.setColumnWidth(0, 70)
+        self.table.setColumnWidth(2, 86)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.table.cellDoubleClicked.connect(self._edit_task)
-        self.table.setStyleSheet(f"""
-            QTableWidget {{ background-color: {BG}; border: none; gridline-color: {BORDER}; }}
-            QHeaderView::section {{ background-color: {PANEL_BG}; padding: 4px; border: 1px solid {BORDER}; }}
-        """)
-        schedule_panel.addWidget(self.table)
-        
-        content_layout.addLayout(schedule_panel, 3)
-        
-        # ── Timer Panel (Right) ──
-        timer_panel = QVBoxLayout()
-        timer_panel.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
-        
-        self.timer_widget = TimerWidget()
-        timer_panel.addWidget(self.timer_widget)
-        
-        timer_controls = QHBoxLayout()
-        self.btn_start = QPushButton("Start Focus")
-        self.btn_start.setObjectName("PrimaryButton")
-        self.btn_start.clicked.connect(self._toggle_timer)
-        self.btn_reset = QPushButton("Reset")
-        self.btn_reset.clicked.connect(self._reset_timer)
-        self.btn_free = QPushButton("Free Timer")
-        self.btn_free.clicked.connect(self._start_free_timer)
-        timer_controls.addWidget(self.btn_start)
-        timer_controls.addWidget(self.btn_reset)
-        timer_controls.addWidget(self.btn_free)
-        timer_panel.addLayout(timer_controls)
-        
-        self.btn_next_task = QPushButton("⏭️ Next Task")
-        self.btn_next_task.clicked.connect(self._advance_task)
-        self.btn_next_task.setStyleSheet(f"background-color: {CARD_BG}; font-weight: bold; padding: 10px;")
-        timer_panel.addWidget(self.btn_next_task)
-        
-        self.btn_mark_complete = QPushButton("✅ Mark Complete")
-        self.btn_mark_complete.setObjectName("PrimaryButton")
-        self.btn_mark_complete.clicked.connect(self._mark_active_task_complete)
-        self.btn_mark_complete.setStyleSheet("font-weight: bold; padding: 10px;")
-        timer_panel.addWidget(self.btn_mark_complete)
-        
-        self.btn_reset_colors = QPushButton("🔄 Reset Colors")
+        self.table.doubleClicked.connect(lambda index: self._edit_task(index.row(), index.column()))
+        schedule_layout.addWidget(self.table, 1)
+        self.schedule_empty = QWidget()
+        empty_layout = QVBoxLayout(self.schedule_empty)
+        empty_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_layout.setSpacing(12)
+        empty_layout.addWidget(label("Make space for a good day.", "SectionTitle"), alignment=Qt.AlignmentFlag.AlignCenter)
+        message = label("Create a routine or import a schedule to get started.")
+        message.setWordWrap(True)
+        message.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(message)
+        open_library = QPushButton("Open schedule library")
+        open_library.setObjectName("PrimaryButton")
+        open_library.clicked.connect(self._open_library)
+        empty_layout.addWidget(open_library, alignment=Qt.AlignmentFlag.AlignCenter)
+        schedule_layout.addWidget(self.schedule_empty, 1)
+        footer = QHBoxLayout()
+        for text, color in (("● Completed", GREEN), ("● Current task", ACCENT)):
+            legend = label(text, "MetricLabel")
+            legend.setStyleSheet(f"color: {color};")
+            footer.addWidget(legend)
+        footer.addStretch()
+        self.btn_reset_colors = QPushButton("Reset completion")
+        self.btn_reset_colors.setObjectName("QuietButton")
         self.btn_reset_colors.clicked.connect(self._reset_colors)
-        self.btn_reset_colors.setStyleSheet(f"background-color: {CARD_BG}; padding: 10px;")
-        timer_panel.addWidget(self.btn_reset_colors)
-        
-        content_layout.addLayout(timer_panel, 2)
-        
-        # Pomodoro Logic
+        footer.addWidget(self.btn_reset_colors)
+        schedule_layout.addLayout(footer)
+        actions = QHBoxLayout()
+        self.btn_mark_complete = QPushButton("Mark complete")
+        self.btn_mark_complete.setObjectName("SuccessButton")
+        self.btn_mark_complete.clicked.connect(self._mark_active_task_complete)
+        self.btn_next_task = QPushButton("Next task")
+        self.btn_next_task.clicked.connect(self._advance_task)
+        actions.addWidget(self.btn_mark_complete, 1)
+        actions.addWidget(self.btn_next_task)
+        schedule_layout.addLayout(actions)
+        schedule_column = QVBoxLayout()
+        schedule_column.setSpacing(12)
+        schedule_column.addLayout(metrics)
+        schedule_column.addWidget(schedule_card, 1)
+        body.addLayout(schedule_column, 1)
+
+        timer_card, timer_layout = card()
+        timer_layout.setContentsMargins(20, 16, 20, 16)
+        timer_layout.setSpacing(6)
+        timer_card.setFixedWidth(314)
+        self.expert_timer_layout = timer_layout
+        body.addWidget(timer_card)
+        root.addLayout(body, 1)
+
         self.timer = PomodoroTimer()
         self.signals = PomodoroSignals()
-        
         self.timer.on_tick = self.signals.tick.emit
         self.timer.on_work_done = self.signals.work_done.emit
         self.timer.on_break_done = self.signals.break_done.emit
         self.timer.on_cycle_update = self.signals.cycle_update.emit
         self.timer.on_free_timer_done = self.signals.free_done.emit
-        self.timer.on_task_completed = self.signals.task_completed.emit
-        
-        self.signals.tick.connect(self._on_tick)
+        self.timer.on_focus_completed = self.signals.focus_completed.emit
+        self.timer.on_stats_update = lambda: self.signals.stats_saved.emit(get_courses())
         self.signals.work_done.connect(self._on_work_done)
         self.signals.break_done.connect(self._on_break_done)
         self.signals.free_done.connect(self._on_free_done)
-        self.signals.task_completed.connect(self._on_task_completed)
-        
+        self.signals.focus_completed.connect(self._on_focus_completed)
         self._load_active_schedule()
+        self.timer.reset()
+        self.experience_mode = None
+        self.expert_course_path = bool(load_settings().get("expert_course_path", True))
+        from .qt_basic import BasicPanel
+        self.basic_panel = BasicPanel(self)
+        self.btn_start = self.basic_panel.start_btn
+        self.btn_reset = self.basic_panel.stop_btn
+        self.basic_surface, self.basic_surface_layout = card()
+        self.basic_surface_layout.setContentsMargins(18, 16, 18, 16)
+        basic_host = QWidget()
+        host = QVBoxLayout(basic_host)
+        host.setContentsMargins(12, 12, 12, 12)
+        host.addWidget(self.basic_surface)
+        host.addStretch()
+        self.basic_page = scroll_page(basic_host, minimum_height=460)
+        self.workspace.addWidget(self.basic_page)
+        self.apply_experience_mode()
+
+    @property
+    def uses_course_path(self):
+        if self.timer.session_id:
+            return self.timer.focus_context is None
+        return self.experience_mode != "expert" or self.expert_course_path
+
+    def toggle_experience_mode(self):
+        saved = load_settings()
+        saved["experience_mode"] = "expert" if self.experience_mode == "basic" else "basic"
+        saved["onboarding_completed"] = True
+        if not save_settings(saved):
+            QMessageBox.warning(self, "Could not switch mode", "Your choice could not be saved. Please try again.")
+            return
+        self.apply_experience_mode()
+
+    def set_expert_course_path(self, checked):
+        if self.experience_mode != "expert":
+            return
+        saved = load_settings()
+        saved["expert_course_path"] = bool(checked)
+        if not save_settings(saved):
+            QMessageBox.warning(self, "Could not switch path", "Your choice could not be saved. Please try again.")
+            self.basic_panel.sync()
+            return
+        old_path = self.uses_course_path
+        self.expert_course_path = bool(checked)
+        if old_path != bool(checked):
+            self.timer.reset()
+            self.timer.set_context(self.basic_panel.course.currentData() if checked else None,
+                                   self.basic_panel.lecture.currentData() if checked else None)
+        self.basic_panel.sync()
+
+    def start_focus(self, seconds):
+        if self.timer.state == PomodoroState.PAUSED:
+            self.timer.start(track_tasks=False)
+            return True
+        target = None
+        try:
+            if self.uses_course_path:
+                self.timer.set_context(self.basic_panel.course.currentData(), self.basic_panel.lecture.currentData())
+            else:
+                target = capture_schedule_target(getattr(self, "current_day", None))
+                if target is None:
+                    self._refresh_table()
+                    return False
+                self.timer.set_context(None, None)
+                self._refresh_table()
+            self.timer.start(seconds, track_tasks=False, focus_context=target)
+        except OSError:
+            QMessageBox.warning(self, "Could not start session", "The schedule could not be saved. Please try again.")
+            return False
+        return True
+
+    def apply_experience_mode(self):
+        mode = get_experience_mode()
+        previous = self.experience_mode
+        self.expert_course_path = bool(load_settings().get("expert_course_path", True))
+        self.experience_mode = mode
+        basic = mode == "basic"
+        self.title_bar.set_basic(basic)
+        if basic:
+            self.basic_surface_layout.addWidget(self.basic_panel)
+            self.workspace.setCurrentWidget(self.basic_page)
+            self.setMinimumSize(400, 520)
+            if previous != mode:
+                self.resize(440, 570)
+        else:
+            self.expert_timer_layout.addWidget(self.basic_panel)
+            self.workspace.setCurrentWidget(self.mode_tabs)
+            self.setMinimumSize(980, 720)
+            if previous != mode:
+                self.resize(1160, 820)
+        self.basic_panel.history_btn.setVisible(basic)
+        self.basic_panel.sync()
 
     def hide_to_tray(self):
         self.hide()
         if self._on_hide:
             self._on_hide()
 
+    def restore_from_tray(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def close_app(self):
+        self.timer.shutdown()
+        QApplication.instance().quit()
+
+    def closeEvent(self, event):
+        event.accept()
+        self.close_app()
+
     def _open_library(self):
         from .qt_library import LibraryDialog
         dlg = LibraryDialog(self)
         dlg.exec()
+        dlg.deleteLater()
         self._load_active_schedule()
 
     def _advance_task(self):
@@ -327,11 +422,17 @@ class MainWindow(QMainWindow):
         active_idx = get_current_task_index(day)
         
         # Determine which task to mark: selected in table, or the active one
-        selected_items = self.table.selectedItems()
-        target_idx = selected_items[0].row() if selected_items else active_idx
+        selected_rows = self.table.selectionModel().selectedRows()
+        target_idx = selected_rows[0].row() if selected_rows else active_idx
         
-        if target_idx >= 0:
+        schedule = load_schedule(day)
+        tasks = schedule.get("tasks", []) if schedule else []
+        if 0 <= target_idx < len(tasks):
+            newly_completed = not tasks[target_idx].get("completed")
             mark_task_completed(target_idx, day)
+            if newly_completed:
+                from .stats import add_task_completed
+                add_task_completed()
             # Only advance if the task marked was the currently ongoing one
             if target_idx == active_idx:
                 self._advance_task()
@@ -359,7 +460,9 @@ class MainWindow(QMainWindow):
     def _open_trends(self):
         from .qt_trends import TrendsDialog
         dlg = TrendsDialog(self)
+        self.signals.stats_saved.connect(dlg.refresh)
         dlg.exec()
+        dlg.deleteLater()
 
     def _on_day_changed(self, text):
         if text:
@@ -376,7 +479,10 @@ class MainWindow(QMainWindow):
                 
                 self.day_selector.blockSignals(True)
                 self.day_selector.clear()
-                self.day_selector.addItems(list(sched.get("weekly_data", {}).keys()))
+                days = list(sched.get("weekly_data", {}).keys())
+                if sched.get("day") not in days:
+                    days.append(sched.get("day"))
+                self.day_selector.addItems(days)
                 self.day_selector.setCurrentText(sched.get("day"))
                 self.day_selector.blockSignals(False)
                 self.day_selector.show()
@@ -385,37 +491,38 @@ class MainWindow(QMainWindow):
                 self.lbl_schedule_title.setText(sched.get("name", "Schedule"))
                 self.day_selector.hide()
                 
-        self._refresh_table()
+        self._refresh_table(sched)
 
-    def _refresh_table(self):
-        sched = load_schedule(self.current_day) if hasattr(self, 'current_day') and self.current_day else load_schedule()
+    def _refresh_table(self, sched=None):
+        if sched is None:
+            sched = load_schedule(getattr(self, 'current_day', None))
         if not sched:
-            self.table.setRowCount(0)
+            self.table_model.set_rows([])
+            self._update_schedule_summary([])
             return
             
         rows = get_display_rows(sched)
-        self.table.setRowCount(len(rows))
-        
-        active_index = get_current_task_index(getattr(self, 'current_day', None))
-        
-        for i, row in enumerate(rows):
-            is_completed = row[4] if len(row) > 4 else False
-            for j in range(4): # Only display first 4 columns
-                val = row[j]
-                item = QTableWidgetItem(str(val))
-                if is_completed:
-                    item.setForeground(QColor(GREEN))
-                elif i < active_index:
-                    item.setForeground(QColor(AMBER)) # Past task not completed
-                elif i == active_index:
-                    # Currently active task
-                    item.setForeground(QColor("#0EA5E9")) # Sky blue
-                    font = item.font()
-                    font.setBold(True)
-                    item.setFont(font)
-                else:
-                    item.setForeground(QColor(TXT_SEC))
-                self.table.setItem(i, j, item)
+        active_index = sched.get("active_task_index", 0)
+        self.table_model.set_rows(rows, active_index)
+        self._update_schedule_summary(rows)
+
+    def _update_schedule_summary(self, rows):
+        index = self.table_model._active_index or 0
+        pending = [row for row in rows[max(0, index):] if not row[4]]
+        self.schedule_focus_name = pending[0][1] if pending else "No unfinished task · open the schedule library"
+        self.schedule_focus_available = bool(pending)
+        completed = sum(bool(row[4]) for row in rows)
+        progress = round(completed * 100 / len(rows)) if rows else 0
+        self.task_count_value.setText(str(len(rows)))
+        self.completed_value.setText(str(completed))
+        self.progress_value.setText(f"{progress}%")
+        self.schedule_progress.setValue(progress)
+        self.table.setVisible(bool(rows))
+        self.schedule_empty.setVisible(not rows)
+        for button in (self.btn_mark_complete, self.btn_next_task, self.btn_reset_colors):
+            button.setEnabled(bool(rows))
+        if hasattr(self, "basic_panel"):
+            self.basic_panel.sync()
 
     def _edit_task(self, row, col):
         sched = load_schedule(self.current_day) if hasattr(self, 'current_day') and self.current_day else load_schedule()
@@ -425,113 +532,41 @@ class MainWindow(QMainWindow):
         dlg = TaskDetailDialog(self, task, row, getattr(self, 'current_day', None))
         if dlg.exec():
             self._load_active_schedule()
+        dlg.deleteLater()
 
     def _toggle_timer(self):
-        if self.timer.is_running:
-            self.timer.pause()
-            self.btn_start.setText("Resume")
-        else:
-            self.timer.start()
-            self.btn_start.setText("Pause")
+        self.basic_panel._toggle()
 
     def _reset_timer(self):
-        self.timer.reset()
-        self.btn_start.setText("Start Focus")
+        self.basic_panel._stop()
 
-    def _start_free_timer(self):
-        from PyQt6.QtWidgets import QInputDialog
-        mins, ok = QInputDialog.getInt(self, "Free Timer", "Minutes:", value=15, min=1, max=300)
-        if ok and mins > 0:
-            self.timer.start_free(mins * 60)
-            self.btn_start.setText("Pause")
-
-    def _on_tick(self, remaining, state):
-        time_str = PomodoroTimer.fmt(remaining)
-        # Calculate proper fraction based on current state
-        total = self.timer._get_work_duration()
-        if state == PomodoroState.SHORT_BREAK:
-            total = self.timer._get_short_break()
-        elif state == PomodoroState.LONG_BREAK:
-            total = self.timer._get_long_break()
-        elif state == PomodoroState.FREE_TIMER:
-            total = self.timer._free_total
-            
-        fraction = remaining / total if total > 0 else 0
-        
-        color = GREEN
-        state_str = "Focus Time"
-        if state == PomodoroState.SHORT_BREAK:
-            color = AMBER
-            state_str = "Short Break"
-        elif state == PomodoroState.LONG_BREAK:
-            color = AMBER
-            state_str = "Long Break"
-        elif state == PomodoroState.FREE_TIMER:
-            color = GREEN
-            state_str = "Free Timer"
-            
-        self.timer_widget.update_state(fraction, time_str, state_str, color, cycle=self.timer.cycle)
-
-    def _on_task_completed(self):
-        from .stats import add_task_completed
-        day = getattr(self, 'current_day', None)
-        idx = get_current_task_index(day)
-        if idx >= 0:
-            mark_task_completed(idx, day)
-            add_task_completed()
-            
-            # Auto advance to next task
-            self._advance_task()
+    def _on_focus_completed(self, session_id, target):
+        if target is None:
+            return
+        try:
+            if complete_schedule_target(target):
+                from .stats import add_task_completed
+                add_task_completed()
+        except OSError:
+            QMessageBox.warning(self, "Could not complete task", "Your study time is kept. Try marking the task complete again.")
+        self._refresh_table()
 
     def _on_work_done(self):
-        self.btn_start.setText("Start Focus")
-        
-        # Bring window to front
-        self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
-        self.activateWindow()
-        
-        from PyQt6.QtWidgets import QMessageBox
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Focus Session Complete")
-        msg.setText("You finished 25 minutes of focus!\nDo you want to start your break now?")
-        msg.setIcon(QMessageBox.Icon.Information)
-        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        msg.setDefaultButton(QMessageBox.StandardButton.Yes)
-        
-        if msg.exec() == QMessageBox.StandardButton.Yes:
-            self.timer.begin_break()
-            self.btn_start.setText("Pause")
+        self.basic_panel.sync()
+        self._notify_phase("Focus complete", "Your study time is saved. Start a break when ready.")
 
     def _on_break_done(self):
-        self.btn_start.setText("Start Focus")
-        
-        from .settings import load_settings
-        settings = load_settings()
-        
-        # Play alarm sound
-        if settings.get("sound_enabled", True):
-            import winsound
-            winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS)
-            
-        from .telegram_bot import notify_async
-        notify_async("⏰ Break is over! Time to get back to work.")
-        show_notification("Break Complete", "Time to get back to work!")
-        
-        # Ask to continue
-        from PyQt6.QtWidgets import QMessageBox
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Break Complete")
-        msg.setText("Your break is over!\nDo you want to continue focusing?")
-        msg.setIcon(QMessageBox.Icon.Information)
-        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        msg.setDefaultButton(QMessageBox.StandardButton.Yes)
-        
-        if msg.exec() == QMessageBox.StandardButton.Yes:
-            self.timer.start()
-            self.btn_start.setText("Pause")
-        
+        self.basic_panel.sync()
+        self._notify_phase("Break complete", "Ready for your next focus session.")
+
     def _on_free_done(self):
-        self.btn_start.setText("Start Focus")
+        self.basic_panel.sync()
+        self._notify_phase("Timer complete", "Your timer has finished.")
+
+    def _notify_phase(self, title, message):
+        if load_settings().get("sound_enabled", True):
+            import winsound
+            winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
+        show_notification(title, message)
         from .telegram_bot import notify_async
-        notify_async("⏰ Free Timer Complete! Your custom timer has finished.")
-        show_notification("Free Timer Complete", "Your custom timer has finished!")
+        notify_async(f"{title}: {message}")

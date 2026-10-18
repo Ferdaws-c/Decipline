@@ -1,321 +1,188 @@
-"""
-qt_trends.py - PyQt6 Trends and Statistics Dialog. Polished redesign.
-"""
+"""A lightweight native study evaluation; opening Trends needs no plotting runtime."""
+import math
+from PyQt6.QtCore import Qt, QRectF
+from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QStandardItemModel, QStandardItem
+from PyQt6.QtWidgets import (QDialog, QWidget, QVBoxLayout, QHBoxLayout, QComboBox,
+                            QPushButton, QTableView, QHeaderView, QToolTip)
+from .qt_style import BG, PANEL_BG, BORDER, TXT_PRI, TXT_SEC, GREEN, ACCENT, FONT_UI
+from .qt_components import label, card, metric, prepare_table
+from .qt_basic import duration
+from .stats import get_stats_summary, course_totals
+from .analytics import evaluate
 
-from datetime import datetime, timedelta
 
-from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-    QFrame, QScrollArea, QWidget, QComboBox, QSizePolicy
-)
-from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QFont, QColor
+class StudyChart(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(140)
+        self.setMouseTracking(True)
+        self.series = []
+        self.bucket = "day"
+        self.undated = 0
+        self._hits = []
+        self.setAccessibleName("Study time chart. Exact values are available by hovering each bar.")
 
-import matplotlib
-matplotlib.use("QtAgg")
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+    def set_data(self, evaluation):
+        self.series, self.bucket = evaluation["series"], evaluation["bucket"]
+        self.undated = evaluation["undated_study"]
+        self.update()
 
-from .qt_style import *
-from .stats import get_stats_summary
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setFont(QFont(FONT_UI, 9))
+        plot = QRectF(58, 12, max(1, self.width() - 76), max(1, self.height() - 45))
+        peak = max((v for _, v in self.series), default=0)
+        self._hits = []
+        if not peak:
+            painter.setPen(QColor(TXT_SEC))
+            message = ("Earlier study is included in your totals.\nNew sessions will appear on this chart." if self.undated else
+                       "Your study time will appear here.\nChoose a course and start a focus session.")
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, message)
+            return
+        step = 300 if peak <= 3600 else 1800 if peak <= 14400 else 3600
+        top = max(step * 4, math.ceil(peak / (step * 4)) * step * 4)
+        for i in range(5):
+            y = plot.bottom() - plot.height() * i / 4
+            painter.setPen(QPen(QColor(BORDER), 1))
+            painter.drawLine(int(plot.left()), int(y), int(plot.right()), int(y))
+            painter.setPen(QColor(TXT_SEC))
+            painter.drawText(QRectF(0, y - 10, 49, 20), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                             duration(top * i / 4))
+        width = plot.width() / max(1, len(self.series))
+        stride = max(1, math.ceil(len(self.series) / 7))
+        for i, (day, seconds) in enumerate(self.series):
+            x = plot.left() + i * width
+            bar = QRectF(x + width * .22, plot.bottom() - seconds / top * plot.height(),
+                         max(2, width * .56), seconds / top * plot.height())
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(GREEN))
+            if seconds:
+                painter.drawRoundedRect(bar, min(4, bar.width() / 3), min(4, bar.height() / 3))
+            self._hits.append((QRectF(x, plot.top(), width, plot.height()), day, seconds))
+            if i % stride == 0:
+                painter.setPen(QColor(TXT_SEC))
+                text = day.strftime("%b %d" if self.bucket in ("day", "week") else "%b %y" if self.bucket == "month" else "%Y")
+                painter.drawText(QRectF(x - 17, plot.bottom() + 7, width + 34, 22), Qt.AlignmentFlag.AlignHCenter, text)
+
+    def mouseMoveEvent(self, event):
+        for rect, day, seconds in self._hits:
+            if rect.contains(event.position()):
+                prefix = "Week of " if self.bucket == "week" else ""
+                QToolTip.showText(event.globalPosition().toPoint(), f"{prefix}{day:%d %b %Y}\n{duration(seconds)} studied", self)
+                return
+        QToolTip.hideText()
 
 
 class TrendsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Trends & Statistics")
-        self.setMinimumSize(560, 620)
-        self.setMaximumWidth(680)
-        self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
-
-        self.stats = get_stats_summary()
-        self.history = self.stats.get("history", {})
-
+        self.setWindowTitle("Study trends")
+        self.resize(800, 700)
+        self.setMinimumSize(680, 660)
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(16)
-
-        # ── Title ────────────────────────────────────────────────────
-        lbl_title = QLabel("Your Progress")
-        lbl_title.setFont(QFont(FONT_UI, 17, QFont.Weight.Bold))
-        root.addWidget(lbl_title)
-
-        # ── Stat Pills ───────────────────────────────────────────────
-        pills = QHBoxLayout()
-        pills.setSpacing(10)
-
-        total_secs = self.stats.get('study_seconds', 0)
-        h = total_secs // 3600
-        m = (total_secs % 3600) // 60
-        pills.addWidget(self._pill(f"{h}h {m}m", "Total Focus", GREEN))
-        pills.addWidget(self._pill(str(self.stats.get('tasks_completed', 0)), "Tasks Done", AMBER))
-        pills.addWidget(self._pill(f"🔥 {self.stats.get('streak', 0)}", "Day Streak", "#FF9F0A"))
-        root.addLayout(pills)
-
-        # ── Chart Header ─────────────────────────────────────────────
-        chart_hdr = QHBoxLayout()
-        lbl_chart = QLabel("Focus Hours")
-        lbl_chart.setFont(QFont(FONT_UI, 13, QFont.Weight.Bold))
-        chart_hdr.addWidget(lbl_chart)
-        chart_hdr.addStretch()
-
+        root.setContentsMargins(22, 20, 22, 20)
+        root.setSpacing(14)
+        heading = QHBoxLayout()
+        heading.addWidget(label("Your study, at a glance.", "PageTitle"))
+        heading.addStretch()
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        heading.addWidget(close)
+        root.addLayout(heading)
+        filters = QHBoxLayout()
+        self.course_combo = QComboBox()
+        self.course_combo.setAccessibleName("Filter trends by course")
+        self.course_combo.setMinimumWidth(160)
         self.range_combo = QComboBox()
-        self.range_combo.addItems(["24 Hours", "Last Week", "Last Month", "Last Year", "All"])
+        self.range_combo.setAccessibleName("Study evaluation period")
+        for title, days in (("Today", 1), ("Last 7 days", 7), ("Last 30 days", 30), ("Last 365 days", 365), ("All time", None)):
+            self.range_combo.addItem(title, days)
         self.range_combo.setCurrentIndex(1)
-        self.range_combo.setFixedWidth(130)
-        self.range_combo.setFixedHeight(28)
-        self.range_combo.setStyleSheet(f"""
-            QComboBox {{
-                background-color: {CARD_BG};
-                border: 1px solid {BORDER};
-                border-radius: 6px;
-                padding: 2px 8px;
-                font-size: 12px;
-                color: {TXT_PRI};
-            }}
-            QComboBox::drop-down {{ border: none; width: 20px; }}
-            QComboBox QAbstractItemView {{
-                background-color: {CARD_BG};
-                border: 1px solid {BORDER};
-                selection-background-color: {BORDER};
-            }}
-        """)
+        filters.addWidget(self.course_combo, 1)
+        filters.addWidget(self.range_combo)
+        refresh = QPushButton("Refresh")
+        refresh.clicked.connect(self.refresh)
+        filters.addWidget(refresh)
+        root.addLayout(filters)
+        metrics = QHBoxLayout()
+        self.values = {}
+        for key, title, color in (("study_seconds", "STUDIED", GREEN), ("pomodoros", "POMODOROS", ACCENT),
+                                  ("active_days", "DAYS STUDIED", None), ("break_seconds", "BREAKS", None)):
+            frame, value = metric(title, "0", color)
+            self.values[key] = value
+            metrics.addWidget(frame)
+        root.addLayout(metrics)
+        chart_card, chart_layout = card()
+        chart_card.setMinimumHeight(220)
+        chart_layout.setContentsMargins(16, 12, 16, 10)
+        chart_layout.setSpacing(4)
+        self.chart_title = label("Daily study time", "SectionTitle")
+        chart_layout.addWidget(self.chart_title)
+        self.chart = StudyChart()
+        chart_layout.addWidget(self.chart, 1)
+        self.insight = label("")
+        self.insight.setWordWrap(True)
+        chart_layout.addWidget(self.insight)
+        root.addWidget(chart_card, 1)
+        self.breakdown_title = label("Time by course", "SectionTitle")
+        root.addWidget(self.breakdown_title)
+        self.model = QStandardItemModel(0, 4, self)
+        self.model.setHorizontalHeaderLabels(["Course", "Study hours", "Breaks", "Pomodoros"])
+        self.table = QTableView()
+        self.table.setModel(self.model)
+        prepare_table(self.table, row_height=36)
+        self.table.setMinimumHeight(110)
+        self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for column, width in ((1, 120), (2, 100), (3, 100)):
+            self.table.setColumnWidth(column, width)
+        root.addWidget(self.table)
+        self.note = label("Breaks are excluded from study hours. Pomodoros count only when the focus countdown finishes.", "MetricLabel")
+        self.note.setWordWrap(True)
+        root.addWidget(self.note)
+        self.course_combo.currentIndexChanged.connect(self._update_chart)
         self.range_combo.currentIndexChanged.connect(self._update_chart)
-        chart_hdr.addWidget(self.range_combo)
-        root.addLayout(chart_hdr)
+        self.refresh()
 
-        # ── Chart ────────────────────────────────────────────────────
-        plt.rcParams.update({
-            'font.family': 'Segoe UI',
-            'axes.spines.top': False,
-            'axes.spines.right': False,
-        })
-        self.figure, self.ax = plt.subplots(figsize=(5.5, 2.4))
-        self.figure.patch.set_facecolor(BG)
-        self.canvas = FigureCanvas(self.figure)
-        self.canvas.setFixedHeight(190)
-        self.canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        root.addWidget(self.canvas)
-
+    def refresh(self, *_):
+        self.stats = get_stats_summary()
+        cid = self.course_combo.currentData()
+        self.course_combo.blockSignals(True)
+        self.course_combo.clear()
+        self.course_combo.addItem("All courses + general study", None)
+        recorded = {s.get("course_id") for s in self.stats.get("lecture_sessions", {}).values()
+                    if s.get("study_seconds") or s.get("break_seconds") or s.get("completed_at")}
+        for key, course in self.stats.get("courses", {}).items():
+            if course.get("deleted") and not any(course_totals(course).values()) and key not in recorded:
+                continue
+            self.course_combo.addItem(course["name"] + (" (removed)" if course.get("deleted") else ""), key)
+        self.course_combo.setCurrentIndex(max(0, self.course_combo.findData(cid)))
+        self.course_combo.blockSignals(False)
         self._update_chart()
 
-        # ── Divider ──────────────────────────────────────────────────
-        div = QFrame()
-        div.setFrameShape(QFrame.Shape.HLine)
-        div.setStyleSheet(f"background-color: {BORDER}; max-height: 1px;")
-        root.addWidget(div)
-
-        # ── Recent History ───────────────────────────────────────────
-        lbl_hist = QLabel("Recent History")
-        lbl_hist.setFont(QFont(FONT_UI, 13, QFont.Weight.Bold))
-        root.addWidget(lbl_hist)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-
-        inner = QWidget()
-        inner.setStyleSheet("background: transparent;")
-        hist_layout = QVBoxLayout(inner)
-        hist_layout.setContentsMargins(0, 0, 0, 0)
-        hist_layout.setSpacing(6)
-
-        sorted_dates = sorted(self.history.keys(), reverse=True)[:14]  # max 14 rows
-
-        if not sorted_dates:
-            lbl_e = QLabel("No sessions recorded yet — start focusing!")
-            lbl_e.setStyleSheet(f"color: {TXT_SEC}; font-size: 13px;")
-            hist_layout.addWidget(lbl_e)
-        else:
-            for date_str in sorted_dates:
-                data = self.history[date_str]
-                h2 = data.get('study_seconds', 0) // 3600
-                m2 = (data.get('study_seconds', 0) % 3600) // 60
-                tasks = data.get('tasks', 0)
-
-                row = QFrame()
-                row.setStyleSheet(f"""
-                    QFrame {{
-                        background-color: {CARD_BG};
-                        border-radius: 8px;
-                        border: 1px solid {BORDER};
-                    }}
-                """)
-                row.setFixedHeight(42)
-                rl = QHBoxLayout(row)
-                rl.setContentsMargins(12, 0, 12, 0)
-
-                # Date
-                lbl_d = QLabel(datetime.strptime(date_str, "%Y-%m-%d").strftime("%a, %d %b %Y"))
-                lbl_d.setFont(QFont(FONT_UI, 11, QFont.Weight.Bold))
-                lbl_d.setStyleSheet(f"color: {TXT_PRI}; background: transparent; border: none;")
-                rl.addWidget(lbl_d)
-                rl.addStretch()
-
-                # Time badge
-                time_badge = QLabel(f"⏱ {h2}h {m2}m")
-                time_badge.setStyleSheet(f"""
-                    background-color: {PANEL_BG}; color: {GREEN};
-                    border-radius: 4px; padding: 2px 7px;
-                    font-size: 11px; font-weight: bold; border: none;
-                """)
-                rl.addWidget(time_badge)
-
-                # Task badge
-                task_badge = QLabel(f"✅ {tasks}")
-                task_badge.setStyleSheet(f"""
-                    background-color: {PANEL_BG}; color: {AMBER};
-                    border-radius: 4px; padding: 2px 7px;
-                    font-size: 11px; font-weight: bold; border: none;
-                    margin-left: 6px;
-                """)
-                rl.addWidget(task_badge)
-
-                hist_layout.addWidget(row)
-
-        hist_layout.addStretch()
-        scroll.setWidget(inner)
-        root.addWidget(scroll)
-
-    # ── Helpers ──────────────────────────────────────────────────────
-
-    def _pill(self, value, label, color):
-        card = QFrame()
-        card.setStyleSheet(f"""
-            QFrame {{
-                background-color: {CARD_BG};
-                border-radius: 10px;
-                border: 1px solid {BORDER};
-            }}
-        """)
-        card.setFixedHeight(72)
-        lay = QVBoxLayout(card)
-        lay.setContentsMargins(12, 8, 12, 8)
-        lay.setSpacing(2)
-
-        lv = QLabel(value)
-        lv.setFont(QFont(FONT_UI, 16, QFont.Weight.Bold))
-        lv.setStyleSheet(f"color: {color}; background: transparent; border: none;")
-        lv.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        ll = QLabel(label)
-        ll.setFont(QFont(FONT_UI, 10))
-        ll.setStyleSheet(f"color: {TXT_SEC}; background: transparent; border: none;")
-        ll.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        lay.addWidget(lv)
-        lay.addWidget(ll)
-        return card
-
-    def _update_chart(self):
-        idx = self.range_combo.currentIndex()
-        self.ax.clear()
-        self.ax.set_facecolor(BG)
-        self.figure.patch.set_facecolor(BG)
-
-        today = datetime.today().date()
-
-        if idx == 0:       # 24 Hours
-            from .stats import load_stats
-            raw = load_stats()
-            day_hourly = raw.get("hourly", {}).get(today.strftime("%Y-%m-%d"), {})
-            x = list(range(24))
-            y = [day_hourly.get(str(h), 0) / 3600 for h in range(24)]
-            tick_labels = [f"{h:02d}" for h in range(24)]
-            self._render(x, y, tick_labels, step=4)
-            self.ax.set_xlim(-0.5, 23.5)
-
-        elif idx == 1:     # Last Week
-            dates = [today - timedelta(days=i) for i in range(6, -1, -1)]
-            y = [self.history.get(d.strftime("%Y-%m-%d"), {}).get("study_seconds", 0) / 3600 for d in dates]
-            labels = [d.strftime("%d %b") for d in dates]
-            self._render(list(range(7)), y, labels, step=1)
-            self.ax.set_xlim(-0.5, 6.5)
-
-        elif idx == 2:     # Last Month
-            dates = [today - timedelta(days=i) for i in range(29, -1, -1)]
-            y = [self.history.get(d.strftime("%Y-%m-%d"), {}).get("study_seconds", 0) / 3600 for d in dates]
-            labels = [d.strftime("%d %b") for d in dates]
-            self._render(list(range(30)), y, labels, step=5)
-            self.ax.set_xlim(-0.5, 29.5)
-
-        elif idx == 3:     # Last Year (weekly)
-            dates = [today - timedelta(days=i) for i in range(364, -1, -1)]
-            bucket_labels, y = self._weekly_buckets(dates)
-            x = list(range(len(bucket_labels)))
-            tick_labels = [d.strftime("%b") for d in bucket_labels]
-            step = max(1, len(x) // 8)
-            self._render(x, y, tick_labels, step=step)
-            if x: self.ax.set_xlim(-0.5, len(x) - 0.5)
-
-        else:              # All Time (monthly)
-            if not self.history:
-                self._render([], [], [], step=1)
-            else:
-                first = datetime.strptime(sorted(self.history.keys())[0], "%Y-%m-%d").date()
-                dates = [first + timedelta(days=i) for i in range((today - first).days + 1)]
-                bucket_labels, y = self._monthly_buckets(dates)
-                x = list(range(len(bucket_labels)))
-                tick_labels = [d.strftime("%b '%y") for d in bucket_labels]
-                step = max(1, len(x) // 8)
-                self._render(x, y, tick_labels, step=step)
-                if x: self.ax.set_xlim(-0.5, len(x) - 0.5)
-
-        # Shared styling
-        self.ax.set_ylabel("hrs", color=TXT_SEC, fontsize=8, labelpad=4)
-        self.ax.tick_params(axis='y', colors=TXT_SEC, labelsize=7, length=0)
-        self.ax.tick_params(axis='x', colors=TXT_SEC, length=0)
-        self.ax.spines['left'].set_visible(False)
-        self.ax.spines['bottom'].set_edgecolor(BORDER)
-        self.ax.spines['top'].set_visible(False)
-        self.ax.spines['right'].set_visible(False)
-        self.ax.grid(axis='y', color=BORDER, linestyle='--', alpha=0.35, zorder=0)
-        self.ax.set_ylim(bottom=0)
-        self.figure.tight_layout(pad=0.6)
-        self.canvas.draw()
-
-    def _render(self, x, y, tick_labels, step=1):
-        if not x or not any(v > 0 for v in y):
-            self.ax.text(0.5, 0.5, "No data yet — start a Pomodoro!",
-                         transform=self.ax.transAxes, ha='center', va='center',
-                         color=TXT_SEC, fontsize=10)
+    def _update_chart(self, *_):
+        if not hasattr(self, "stats"):
             return
-
-        # Gradient-style bars using alpha steps
-        self.ax.bar(x, y, color=AMBER, alpha=0.75, width=0.55, zorder=3)
-
-        # Smooth line on top
-        self.ax.plot(x, y, color="#FBBF24", linewidth=1.8, zorder=4,
-                     marker='o', markersize=2.5, markerfacecolor="#FBBF24",
-                     markeredgewidth=0)
-
-        # Highlight peak bar
-        if y:
-            peak = max(y)
-            peak_idx = y.index(peak)
-            self.ax.bar([x[peak_idx]], [peak], color="#FBBF24", alpha=1.0, width=0.55, zorder=3)
-
-        self.ax.set_xticks(x[::step])
-        self.ax.set_xticklabels(tick_labels[::step], rotation=30, ha='right',
-                                 fontsize=7.5, color=TXT_SEC)
-
-    def _weekly_buckets(self, date_range):
-        week_data, week_order = {}, []
-        for d in date_range:
-            monday = d - timedelta(days=d.weekday())
-            key = monday.strftime("%Y-%m-%d")
-            if key not in week_data:
-                week_data[key] = 0
-                week_order.append(monday)
-            week_data[key] += self.history.get(d.strftime("%Y-%m-%d"), {}).get("study_seconds", 0) / 3600
-        return week_order, [week_data[d.strftime("%Y-%m-%d")] for d in week_order]
-
-    def _monthly_buckets(self, date_range):
-        month_data, month_order = {}, []
-        for d in date_range:
-            key = d.strftime("%Y-%m")
-            if key not in month_data:
-                month_data[key] = 0
-                month_order.append(datetime.strptime(key, "%Y-%m").date())
-            month_data[key] += self.history.get(d.strftime("%Y-%m-%d"), {}).get("study_seconds", 0) / 3600
-        return month_order, [month_data[d.strftime("%Y-%m")] for d in month_order]
+        result = evaluate(self.stats, self.range_combo.currentData(), self.course_combo.currentData())
+        self.evaluation = result
+        for key, widget in self.values.items():
+            widget.setText(duration(result[key]) if key.endswith("seconds") else str(result[key]))
+        titles = {"day": "Daily study time", "week": "Weekly study time", "month": "Monthly study time", "year": "Yearly study time"}
+        self.chart_title.setText(titles[result["bucket"]])
+        self.chart.set_data(result)
+        self.insight.setText(f"{duration(result['average'])} per day studied · {result['active_days']} days with focus time"
+                             if result["active_days"] else "Small sessions add up. Start with one focus session.")
+        if result["undated_study"]:
+            self.insight.setText(f"{duration(result['undated_study'])} of earlier study has no date and is included in the totals.")
+        self.model.removeRows(0, self.model.rowCount())
+        course_selected = self.course_combo.currentData() is not None
+        self.breakdown_title.setText("Time by lecture" if course_selected else "Time by course")
+        self.model.setHorizontalHeaderLabels(["Lecture" if course_selected else "Course", "Study hours", "Breaks", "Pomodoros"])
+        for cid, row in result["lectures"] if course_selected else result["courses"]:
+            items = [QStandardItem(row["name"]), QStandardItem(f"{row['study_seconds'] / 3600:.2f} h"),
+                     QStandardItem(duration(row["break_seconds"])), QStandardItem(str(row["pomodoros"]))]
+            items[1].setToolTip(f"{duration(row['study_seconds'])} · {int(row['study_seconds'])} seconds")
+            for item in items[1:]:
+                item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.model.appendRow(items)

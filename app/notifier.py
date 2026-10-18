@@ -4,7 +4,7 @@ notifier.py - PyQt6 Toast Notifications.
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
-    QPushButton, QFrame
+    QPushButton, QFrame, QApplication, QSystemTrayIcon
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
@@ -105,5 +105,12 @@ class AlarmDonePopup(QDialog):
 
 
 def show_notification(title, message):
-    """Temporary stand-in. In Qt we should use a proper toast."""
-    pass
+    """Use the application's native Windows tray notification without blocking."""
+    app = QApplication.instance()
+    if app is None or not QSystemTrayIcon.supportsMessages():
+        return False
+    for tray in app.findChildren(QSystemTrayIcon):
+        if tray.isVisible():
+            tray.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 6000)
+            return True
+    return False

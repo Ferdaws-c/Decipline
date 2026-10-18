@@ -4,7 +4,7 @@ qt_task_editor.py - Full CRUD task editor for a schedule (daily or weekly).
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QTableWidget, QTableWidgetItem,
+    QPushButton, QTableView,
     QHeaderView, QAbstractItemView, QComboBox,
     QLineEdit, QSpinBox, QTextEdit, QFrame, QMessageBox
 )
@@ -13,8 +13,10 @@ from PyQt6.QtGui import QFont, QColor
 
 from .qt_style import *
 from .storage import (
-    get_schedule_by_id, get_schedule_tasks, save_schedule_tasks
+    get_schedule_by_id, get_schedule_tasks, save_schedule_tasks, get_display_rows, get_schedule_position
 )
+from .qt_schedule_model import ScheduleTableModel
+from .qt_components import label, prepare_table
 
 DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
@@ -24,15 +26,15 @@ class SingleTaskDialog(QDialog):
     def __init__(self, parent=None, task=None):
         super().__init__(parent)
         self.setWindowTitle("Add Task" if not task else "Edit Task")
-        self.setFixedSize(380, 280)
+        self.setMinimumSize(440, 450)
+        self.resize(460, 480)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
 
-        lbl = QLabel("Add Task" if not task else "Edit Task")
-        lbl.setFont(QFont(FONT_UI, 14, QFont.Weight.Bold))
+        lbl = label("Add a task" if not task else "Edit task", "PageTitle")
         layout.addWidget(lbl)
         
         self.task = task
@@ -98,6 +100,7 @@ class SingleTaskDialog(QDialog):
         is_completed = self.task.get("completed", False) if hasattr(self, 'task') and self.task else False
         
         self.result_task = {
+            **(self.task or {}),
             "time": self.entry_time.text().strip(),
             "text": name,
             "duration": self.spin_dur.value(),
@@ -116,7 +119,7 @@ class TaskEditorDialog(QDialog):
         self.current_day = DAYS[0]
 
         self.setWindowTitle(f"Edit Tasks — {schedule_name}")
-        self.setMinimumSize(700, 500)
+        self.setMinimumSize(820, 560)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
 
         layout = QVBoxLayout(self)
@@ -125,8 +128,7 @@ class TaskEditorDialog(QDialog):
 
         # Header
         hdr = QHBoxLayout()
-        lbl = QLabel(f"✏️ {schedule_name}")
-        lbl.setFont(QFont(FONT_UI, 16, QFont.Weight.Bold))
+        lbl = label(schedule_name, "PageTitle")
         hdr.addWidget(lbl)
         hdr.addStretch()
         layout.addLayout(hdr)
@@ -144,8 +146,10 @@ class TaskEditorDialog(QDialog):
             layout.addLayout(day_row)
 
         # Table
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["Time", "Task", "Duration", "Notes"])
+        self.table = QTableView()
+        self.table_model = ScheduleTableModel(self.table)
+        self.table.setModel(self.table_model)
+        self.table.doubleClicked.connect(lambda: self._edit_task())
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
@@ -156,10 +160,7 @@ class TaskEditorDialog(QDialog):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.table.setStyleSheet(f"""
-            QTableWidget {{ background-color: {BG}; border: 1px solid {BORDER}; gridline-color: {BORDER}; }}
-            QHeaderView::section {{ background-color: {PANEL_BG}; padding: 4px; border: 1px solid {BORDER}; }}
-        """)
+        prepare_table(self.table)
         layout.addWidget(self.table)
 
         # Controls
@@ -170,24 +171,26 @@ class TaskEditorDialog(QDialog):
         btn_add.clicked.connect(self._add_task)
         ctrl.addWidget(btn_add)
 
-        btn_edit = QPushButton("✏️ Edit")
+        btn_edit = QPushButton("Edit task")
         btn_edit.clicked.connect(self._edit_task)
         ctrl.addWidget(btn_edit)
 
-        btn_delete = QPushButton("🗑️ Delete")
-        btn_delete.setStyleSheet("background-color: #EF4444; color: white;")
+        btn_delete = QPushButton("Delete")
+        btn_delete.setObjectName("DangerButton")
         btn_delete.clicked.connect(self._delete_task)
         ctrl.addWidget(btn_delete)
 
         ctrl.addStretch()
 
         btn_up = QPushButton("▲")
-        btn_up.setFixedWidth(36)
+        btn_up.setFixedWidth(42)
+        btn_up.setToolTip("Move task up")
         btn_up.clicked.connect(self._move_up)
         ctrl.addWidget(btn_up)
 
         btn_down = QPushButton("▼")
-        btn_down.setFixedWidth(36)
+        btn_down.setFixedWidth(42)
+        btn_down.setToolTip("Move task down")
         btn_down.clicked.connect(self._move_down)
         ctrl.addWidget(btn_down)
 
@@ -203,30 +206,26 @@ class TaskEditorDialog(QDialog):
         day = self.current_day if self.schedule_type == "weekly" else None
         return list(get_schedule_tasks(self.sid, day))
 
-    def _save_tasks(self, tasks):
+    def _save_tasks(self, tasks, active_index=None):
         day = self.current_day if self.schedule_type == "weekly" else None
-        save_schedule_tasks(self.sid, tasks, day)
+        try:
+            save_schedule_tasks(self.sid, tasks, day, active_index)
+        except OSError as error:
+            QMessageBox.warning(self, "Could not save tasks", str(error))
+            return False
+        return True
+
+    def _position(self):
+        return get_schedule_position(self.sid, self.current_day if self.schedule_type == "weekly" else None)
 
     def _refresh_table(self):
         tasks = self._get_tasks()
-        self.table.setRowCount(len(tasks))
-        for i, task in enumerate(tasks):
-            is_done = task.get("completed", False)
-            color = QColor(GREEN) if is_done else QColor(TXT_SEC)
-            for j, val in enumerate([
-                task.get("time", ""),
-                task.get("text", ""),
-                f"{str(task.get('duration', 0)).lower().replace('min', '').strip()} min",
-                task.get("notes", "")
-            ]):
-                item = QTableWidgetItem(val)
-                item.setForeground(color)
-                self.table.setItem(i, j, item)
+        self.table_model.set_rows(get_display_rows({"tasks": tasks}))
 
     def _selected_row(self):
-        rows = self.table.selectedItems()
+        rows = self.table.selectionModel().selectedRows()
         if rows:
-            return self.table.currentRow()
+            return rows[0].row()
         return -1
 
     def _add_task(self):
@@ -236,6 +235,7 @@ class TaskEditorDialog(QDialog):
             tasks.append(dlg.result_task)
             self._save_tasks(tasks)
             self._refresh_table()
+        dlg.deleteLater()
 
     def _edit_task(self):
         row = self._selected_row()
@@ -248,6 +248,7 @@ class TaskEditorDialog(QDialog):
             tasks[row] = dlg.result_task
             self._save_tasks(tasks)
             self._refresh_table()
+        dlg.deleteLater()
 
     def _delete_task(self):
         row = self._selected_row()
@@ -258,9 +259,11 @@ class TaskEditorDialog(QDialog):
         msg.setWindowTitle("Delete Task")
         msg.setText(f"Delete \"{tasks[row].get('text', 'this task')}\"?")
         msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        msg.setDefaultButton(QMessageBox.StandardButton.No)
         if msg.exec() == QMessageBox.StandardButton.Yes:
             tasks.pop(row)
-            self._save_tasks(tasks)
+            active = self._position()
+            self._save_tasks(tasks, active - 1 if row < active else active)
             self._refresh_table()
 
     def _move_up(self):
@@ -269,7 +272,9 @@ class TaskEditorDialog(QDialog):
             return
         tasks = self._get_tasks()
         tasks[row], tasks[row - 1] = tasks[row - 1], tasks[row]
-        self._save_tasks(tasks)
+        active = self._position()
+        target = row - 1
+        self._save_tasks(tasks, target if active == row else row if active == target else active)
         self._refresh_table()
         self.table.selectRow(row - 1)
 
@@ -279,6 +284,8 @@ class TaskEditorDialog(QDialog):
         if row < 0 or row >= len(tasks) - 1:
             return
         tasks[row], tasks[row + 1] = tasks[row + 1], tasks[row]
-        self._save_tasks(tasks)
+        active = self._position()
+        target = row + 1
+        self._save_tasks(tasks, target if active == row else row if active == target else active)
         self._refresh_table()
         self.table.selectRow(row + 1)

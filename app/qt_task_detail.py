@@ -11,6 +11,7 @@ from PyQt6.QtGui import QFont
 
 from .qt_style import *
 from .storage import postpone_task, complete_task
+from .qt_components import label
 
 class TaskDetailDialog(QDialog):
     def __init__(self, parent, task, row_index, day_of_week=None):
@@ -19,14 +20,13 @@ class TaskDetailDialog(QDialog):
         self.row_index = row_index
         self.day_of_week = day_of_week
         self.setWindowTitle("Task Details")
-        self.setFixedSize(400, 350)
+        self.setMinimumSize(500, 430)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         
-        lbl = QLabel("Task Details")
-        lbl.setFont(QFont(FONT_UI, 16, QFont.Weight.Bold))
+        lbl = label("Task details", "PageTitle")
         layout.addWidget(lbl)
         
         layout.addWidget(QLabel("Task Name:"))
@@ -42,17 +42,17 @@ class TaskDetailDialog(QDialog):
         ctrl = QHBoxLayout()
         
         btn_delete = QPushButton("Delete")
-        btn_delete.setStyleSheet("background-color: #EF4444; color: white;")
+        btn_delete.setObjectName("DangerButton")
         btn_delete.clicked.connect(self._delete)
         ctrl.addWidget(btn_delete)
         
-        btn_postpone = QPushButton("Postpone (-15m)")
+        btn_postpone = QPushButton("Postpone 15 min")
         btn_postpone.clicked.connect(self._postpone)
         ctrl.addWidget(btn_postpone)
         
         btn_start_task = QPushButton("Start Task")
         btn_start_task.clicked.connect(self._start_task)
-        btn_start_task.setStyleSheet("font-weight: bold;")
+        btn_start_task.setObjectName("PrimaryButton")
         ctrl.addWidget(btn_start_task)
         
         layout.addLayout(ctrl)

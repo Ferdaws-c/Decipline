@@ -3,8 +3,10 @@ import os
 import uuid
 from datetime import datetime, timedelta
 import re
+import tempfile
+from .paths import data_path
 
-DB_PATH = "schedules.json"
+DB_PATH = data_path("schedules.json")
 
 def load_db():
     if not os.path.exists(DB_PATH):
@@ -16,11 +18,24 @@ def load_db():
         return {"active_daily_id": None, "active_weekly_id": None, "schedules": {}}
 
 def save_db(data):
+    """Replace the library atomically; let callers report failed changes."""
+    temporary = None
     try:
-        with open(DB_PATH, "w", encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                dir=os.path.dirname(os.path.abspath(DB_PATH)), delete=False) as f:
+            temporary = f.name
             json.dump(data, f, indent=2)
-    except Exception:
-        pass
+        os.replace(temporary, DB_PATH)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _schedule_name(name):
+    name = name.strip()
+    if not name:
+        raise ValueError("Enter a schedule name.")
+    return name
 
 def get_daily_schedules():
     db = load_db()
@@ -50,6 +65,7 @@ def set_active_schedule(sid):
         save_db(db)
 
 def create_daily_schedule(name, tasks):
+    name = _schedule_name(name)
     db = load_db()
     sid = str(uuid.uuid4())
     db["schedules"][sid] = {"name": name, "type": "daily", "data": tasks}
@@ -59,6 +75,7 @@ def create_daily_schedule(name, tasks):
     return sid
 
 def create_weekly_schedule(name, weekly_data):
+    name = _schedule_name(name)
     db = load_db()
     sid = str(uuid.uuid4())
     db["schedules"][sid] = {"name": name, "type": "weekly", "data": weekly_data}
@@ -68,6 +85,7 @@ def create_weekly_schedule(name, weekly_data):
     return sid
 
 def rename_schedule(sid, name):
+    name = _schedule_name(name)
     db = load_db()
     if sid in db.get("schedules", {}):
         db["schedules"][sid]["name"] = name
@@ -79,6 +97,9 @@ def delete_schedule(sid):
         del db["schedules"][sid]
         if db.get("active_daily_id") == sid: db["active_daily_id"] = None
         if db.get("active_weekly_id") == sid: db["active_weekly_id"] = None
+        for key in list(db):
+            if key == f"active_task_index_{sid}" or key.startswith(f"active_task_index_{sid}_"):
+                del db[key]
         save_db(db)
 
 def load_schedule(day_of_week=None):
@@ -89,7 +110,8 @@ def load_schedule(day_of_week=None):
         sid = db.get("active_daily_id")
         if sid and sid in db.get("schedules", {}):
             s = db["schedules"][sid]
-            return {"name": s["name"], "tasks": s["data"]}
+            return {"name": s["name"], "tasks": s["data"],
+                    "active_task_index": db.get(f"active_task_index_{sid}", 0)}
     else:
         sid = db.get("active_weekly_id")
         if sid and sid in db.get("schedules", {}):
@@ -99,7 +121,9 @@ def load_schedule(day_of_week=None):
                 day_of_week = datetime.today().strftime("%A")
             tasks = weekly_data.get(day_of_week, [])
             # Also return the weekly data and current day so the UI can build tabs
-            return {"name": f"{s['name']} ({day_of_week})", "tasks": tasks, "is_weekly": True, "day": day_of_week, "weekly_data": weekly_data}
+            return {"name": f"{s['name']} ({day_of_week})", "tasks": tasks,
+                    "is_weekly": True, "day": day_of_week, "weekly_data": weekly_data,
+                    "active_task_index": db.get(f"active_task_index_{sid}_{day_of_week}", 0)}
             
     return None
 
@@ -204,6 +228,59 @@ def mark_task_completed(row_index, day_of_week=None):
     tasks[row_index]["completed"] = True
     save_active_schedule(tasks, day_of_week)
 
+
+def capture_schedule_target(day_of_week=None):
+    """Bind a focus session to a stable task, even if the user changes the view."""
+    db = load_db()
+    weekly = db.get("active_mode", "daily") == "weekly"
+    sid = db.get("active_weekly_id" if weekly else "active_daily_id")
+    schedule = db.get("schedules", {}).get(sid)
+    if not schedule:
+        return None
+    day = (day_of_week or datetime.today().strftime("%A")) if weekly else None
+    tasks = schedule["data"].get(day, []) if weekly else schedule["data"]
+    key = f"active_task_index_{sid}" + (f"_{day}" if day else "")
+    index = max(0, db.get(key, 0))
+    while index < len(tasks) and tasks[index].get("completed"):
+        index += 1
+    if index >= len(tasks):
+        return None
+    task = tasks[index]
+    identity = task.get("_decipline_task_id")
+    unique = bool(identity) and sum(t.get("_decipline_task_id") == identity for t in tasks) == 1
+    if not unique or db.get(key, 0) != index:
+        if not unique:
+            task["_decipline_task_id"] = str(uuid.uuid4())
+        db[key] = index
+        save_db(db)
+    return {"schedule_id": sid, "day": day, "task_id": task["_decipline_task_id"],
+            "text": task.get("text", "Task")}
+
+
+def complete_schedule_target(target):
+    """Complete only the originally timed task; deleted or already completed tasks are skipped."""
+    db = load_db()
+    sid, day = target["schedule_id"], target["day"]
+    schedule = db.get("schedules", {}).get(sid)
+    if not schedule:
+        return False
+    tasks = schedule["data"].get(day, []) if schedule["type"] == "weekly" else schedule["data"]
+    for index, task in enumerate(tasks):
+        if task.get("_decipline_task_id") != target["task_id"]:
+            continue
+        if task.get("completed"):
+            return False
+        task["completed"] = True
+        key = f"active_task_index_{sid}" + (f"_{day}" if day else "")
+        if db.get(key, 0) == index:
+            next_index = index + 1
+            while next_index < len(tasks) and tasks[next_index].get("completed"):
+                next_index += 1
+            db[key] = next_index
+        save_db(db)
+        return True
+    return False
+
 def get_current_task_index(day_of_week=None):
     """Returns the manually tracked active task index."""
     db = load_db()
@@ -253,7 +330,12 @@ def get_schedule_by_id(sid):
         return {"id": sid, "name": s["name"], "type": s["type"], "data": s["data"]}
     return None
 
-def save_schedule_tasks(sid, tasks, day_of_week=None):
+def get_schedule_position(sid, day_of_week=None):
+    key = f"active_task_index_{sid}" + (f"_{day_of_week}" if day_of_week else "")
+    return load_db().get(key, 0)
+
+
+def save_schedule_tasks(sid, tasks, day_of_week=None, active_index=None):
     """Save tasks directly to a specific schedule by ID (for the editor)."""
     db = load_db()
     if sid not in db.get("schedules", {}):
@@ -267,6 +349,9 @@ def save_schedule_tasks(sid, tasks, day_of_week=None):
         if day_of_week not in db["schedules"][sid]["data"]:
             db["schedules"][sid]["data"][day_of_week] = []
         db["schedules"][sid]["data"][day_of_week] = tasks
+    key = f"active_task_index_{sid}" + (f"_{day_of_week}" if s["type"] == "weekly" else "")
+    current = db.get(key, 0) if active_index is None else active_index
+    db[key] = max(0, min(current, len(tasks)))
     save_db(db)
 
 def get_schedule_tasks(sid, day_of_week=None):

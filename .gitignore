@@ -7,6 +7,7 @@ __pycache__/
 # Build
 build/
 *.spec
+!Decipline.spec
 
 # OS
 .DS_Store
@@ -15,4 +16,5 @@ Thumbs.db
 # User data
 settings.json
 schedules.json
+stats.json
 dist/
