@@ -2,6 +2,16 @@
 
 A local Windows study app: choose a course, start a Pomodoro, and see where your study hours went. It also supports daily and weekly schedules in Expert mode.
 
+## Watch Decipline in action
+
+A 60-second tour of course and lecture tracking, Pomodoro cycles, separate breaks, Expert schedules, study Trends, and customizable AI prompts.
+
+<video src="https://raw.githubusercontent.com/Ferdaws-c/Decipline/main/assets/showcase/Decipline-Showcase.mp4" controls width="960" poster="https://raw.githubusercontent.com/Ferdaws-c/Decipline/main/assets/showcase/preview.jpg"></video>
+
+[Watch or download the full showcase (1080p MP4)](assets/showcase/Decipline-Showcase.mp4)
+
+*Uses sample data. Timer sequences are accelerated.*
+
 ![Compact Basic mode](assets/ui_preview.png)
 
 ## Start studying
