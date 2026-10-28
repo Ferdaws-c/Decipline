@@ -38,6 +38,10 @@ def _acquire_single_instance(port: int = 52187):
 
 def main():
     multiprocessing.freeze_support()
+    from app import __version__
+    if "--version" in sys.argv:
+        print(__version__)
+        return
     # A packaged smoke check gets isolated data and can run beside the real app.
     smoke_test = "--smoke-test" in sys.argv
     smoke_directory = None
@@ -53,6 +57,7 @@ def main():
         sys.exit(0)
 
     app = QApplication(sys.argv)
+    app.setApplicationVersion(__version__)
     apply_global_style(app)
     
     # Needs to be set to prevent app closing when main window is hidden
@@ -102,6 +107,7 @@ def main():
 
     if smoke_test:
         window._notify_phase = lambda *args: None
+        window._play_notification_sound = lambda: None
         from PyQt6.QtCore import QTimer
         from app.qt_trends import TrendsDialog
         from app import stats, storage
@@ -121,7 +127,10 @@ def main():
         with window.timer._condition:
             window.timer._deadline -= 60
         basic._toggle()
-        basic._toggle()
+        assert window._focus_done_popup is not None
+        assert not window.timer.is_running
+        window._focus_done_popup.accept()
+        assert window.timer.is_running
         basic._stop()
         scheduled = storage.create_daily_schedule("Schedule path smoke", [
             {"text": "Finish this task", "duration": 1}, {"text": "Keep next task", "duration": 1}])
@@ -139,6 +148,7 @@ def main():
         basic._toggle()
         assert storage.get_schedule_tasks(scheduled)[0]["completed"]
         assert not storage.get_schedule_tasks(scheduled)[1].get("completed")
+        window._focus_done_popup.reject()
         basic._stop()
         window.title_bar.mode_button.click()
         assert not basic.course_path_checkbox.isChecked()
@@ -184,6 +194,14 @@ def main():
         setup = SetupDialog(window)
         setup.save_choice()
         setup.deleteLater()
+        from app.qt_settings import SettingsDialog
+        telegram_settings = SettingsDialog(window)
+        telegram_settings.mode_combo.setCurrentIndex(1)
+        telegram_settings.telegram_help_btn.click()
+        assert telegram_settings._telegram_help_dialog is not None
+        assert "Find my chat ID" in telegram_settings._telegram_help_dialog.instructions.toPlainText()
+        telegram_settings._telegram_help_dialog.accept()
+        telegram_settings.deleteLater()
         window.apply_experience_mode()
         QTimer.singleShot(250, app.quit)
 

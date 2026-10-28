@@ -114,6 +114,10 @@ def main():
                 capture(dialog, 'trends-course')
                 dialog.resize(680, 620)
                 capture(dialog, 'trends-minimum')
+            if name == 'settings':
+                dialog.telegram_help_btn.click()
+                capture(dialog._telegram_help_dialog, 'telegram-setup-guide')
+                dialog._telegram_help_dialog.accept()
             if name == 'manage-courses':
                 unused = stats.create_course('Earlier course')
                 stats.delete_course(unused)

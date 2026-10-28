@@ -43,6 +43,7 @@ class TrackingPathTests(unittest.TestCase):
         settings.save_settings({**settings.load_settings(), 'experience_mode': 'expert' if expert else 'basic'})
         window = MainWindow()
         window._notify_phase = Mock()
+        window._show_focus_completion = Mock()
         window.basic_panel.reload_courses(self.cid)
         def close():
             window.timer.shutdown()
@@ -341,6 +342,97 @@ class TrackingPathTests(unittest.TestCase):
         window.timer.shutdown()
         self.assertEqual(stats.get_stats_summary()['study_seconds'], 60)
         self.assertEqual(stats.get_stats_summary()['break_seconds'], 5)
+
+
+class NotificationTests(unittest.TestCase):
+    setUpClass = classmethod(TrackingPathTests.setUpClass.__func__)
+    setUp = TrackingPathTests.setUp
+    window = TrackingPathTests.window
+    finish = TrackingPathTests.finish
+
+    def completion(self, cycle=1):
+        window = self.window()
+        window._show_focus_completion = MainWindow._show_focus_completion.__get__(window)
+        window._play_notification_sound = Mock()
+        window.timer.select_cycle(cycle - 1)
+        window.basic_panel.minutes.setValue(1)
+        window.basic_panel._toggle()
+        return window
+
+    def test_focus_popup_waits_for_ok_and_restores_hidden_window(self):
+        from PyQt6.QtWidgets import QDialogButtonBox
+        window = self.completion()
+        window.hide_to_tray()
+        with patch('app.telegram_bot.notify_async') as telegram:
+            self.finish(window)
+            popup = window._focus_done_popup
+            self.assertTrue(window.isVisible())
+            self.assertTrue(popup.isVisible())
+            self.assertEqual(window.timer.state, State.WAITING_FOR_BREAK)
+            self.assertIsNone(window.timer._deadline)
+            window._on_work_done()
+            self.assertIs(window._focus_done_popup, popup)
+            popup.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Ok).click()
+            self.assertEqual(window.timer.state, State.SHORT_BREAK)
+            self.assertTrue(window.timer.is_running)
+            self.assertGreater(window.timer.remaining, settings.load_settings()['short_break'] * 60 - 2)
+            self.assertIsNone(window._focus_done_popup)
+            telegram.assert_not_called()
+
+    def test_fourth_cycle_ok_starts_full_long_break(self):
+        window = self.completion(4)
+        self.finish(window)
+        window._focus_done_popup.accept()
+        self.assertEqual(window.timer.state, State.LONG_BREAK)
+        self.assertGreater(window.timer.remaining, settings.load_settings()['long_break'] * 60 - 2)
+
+    def test_closing_popup_does_not_start_break(self):
+        window = self.completion()
+        self.finish(window)
+        window._focus_done_popup.close()
+        self.assertIsNone(window._focus_done_popup)
+        self.assertEqual(window.timer.state, State.WAITING_FOR_BREAK)
+        self.assertFalse(window.timer.is_running)
+        window.basic_panel._toggle()
+        self.assertEqual(window.timer.state, State.SHORT_BREAK)
+
+    def test_reset_dismisses_popup_and_stale_ok_cannot_start_new_session_break(self):
+        window = self.completion()
+        self.finish(window)
+        old_popup = window._focus_done_popup
+        window.timer.reset()
+        self.assertIsNone(window._focus_done_popup)
+        window.basic_panel._toggle()
+        # Complete synchronously so the old dialog is still alive until Qt deletes it.
+        with window.timer._condition:
+            window.timer._update(window.timer._deadline)
+        new_popup = window._focus_done_popup
+        old_popup.accept()
+        self.assertEqual(window.timer.state, State.WAITING_FOR_BREAK)
+        self.assertIs(window._focus_done_popup, new_popup)
+        new_popup.reject()
+
+    def test_only_natural_break_completion_sends_telegram(self):
+        window = self.completion()
+        with patch('app.telegram_bot.notify_async') as telegram:
+            self.finish(window)
+            window._focus_done_popup.accept()
+            self.finish(window)
+            telegram.assert_called_once_with('Break complete: Ready for your next focus session.')
+            with patch('app.qt_window.show_notification') as local_notice:
+                window._notify_phase = MainWindow._notify_phase.__get__(window)
+                window._on_free_done()
+                local_notice.assert_called_once_with('Timer complete', 'Your timer has finished.')
+            self.assertEqual(telegram.call_count, 1)
+
+    def test_ending_break_early_does_not_send_telegram(self):
+        window = self.completion()
+        with patch('app.telegram_bot.notify_async') as telegram:
+            self.finish(window)
+            window._focus_done_popup.accept()
+            window.timer.end_break()
+            self.app.processEvents()
+            telegram.assert_not_called()
 
 
 if __name__ == '__main__':

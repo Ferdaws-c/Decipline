@@ -6,12 +6,17 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QSpinBox, QCheckBox, QLineEdit, QComboBox, QWidget
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QObject, pyqtSignal
 from PyQt6.QtGui import QFont
 
 from .qt_style import *
 from .settings import load_settings, save_settings
 from .qt_components import label, card
+
+
+class TelegramSettingsSignals(QObject):
+    finished = pyqtSignal(str, object, object)
+
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
@@ -21,6 +26,10 @@ class SettingsDialog(QDialog):
         self.resize(800, 590)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
         self.settings = load_settings()
+        self._telegram_help_dialog = None
+        self._telegram_busy = False
+        self._telegram_signals = TelegramSettingsSignals(self)
+        self._telegram_signals.finished.connect(self._telegram_finished)
         root = QVBoxLayout(self)
         root.setContentsMargins(26, 24, 26, 24)
         root.setSpacing(18)
@@ -62,7 +71,7 @@ class SettingsDialog(QDialog):
         schedule_hint.setWordWrap(True)
         focus.addWidget(schedule_hint)
         self._advanced_rows.append(schedule_hint)
-        self.chk_sound = QCheckBox("Play a sound when breaks end")
+        self.chk_sound = QCheckBox("Play a sound when timers finish")
         self.chk_sound.setChecked(self.settings.get("sound_enabled", True))
         focus.addWidget(self.chk_sound)
         focus.addStretch()
@@ -71,21 +80,36 @@ class SettingsDialog(QDialog):
         telegram_card, telegram = card()
         self.telegram_card = telegram_card
         telegram.addWidget(label("Telegram notifications", "SectionTitle"))
-        self.chk_tg = QCheckBox("Send notifications to my phone")
+        self.telegram_help_btn = QPushButton("How to set up Telegram")
+        self.telegram_help_btn.setObjectName("QuietButton")
+        self.telegram_help_btn.clicked.connect(self._open_telegram_help)
+        telegram.addWidget(self.telegram_help_btn)
+        hint = label("Get a phone reminder when your break ends. Setup is optional.", "MetricLabel")
+        hint.setWordWrap(True)
+        telegram.addWidget(hint)
+        self.chk_tg = QCheckBox("Notify me when a break ends")
         self.chk_tg.setChecked(self.settings.get("telegram_enabled", False))
         telegram.addWidget(self.chk_tg)
         telegram.addWidget(label("BOT TOKEN", "MetricLabel"))
         self.entry_token = QLineEdit(self.settings.get("telegram_token", ""))
         self.entry_token.setPlaceholderText("Token from @BotFather")
-        self.entry_token.setEchoMode(QLineEdit.EchoMode.PasswordEchoOnEdit)
+        self.entry_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.entry_token.setAccessibleName("Telegram bot token")
         telegram.addWidget(self.entry_token)
         telegram.addWidget(label("CHAT ID", "MetricLabel"))
         self.entry_chat_id = QLineEdit(self.settings.get("telegram_chat_id", ""))
         self.entry_chat_id.setPlaceholderText("Your Telegram chat ID")
+        self.entry_chat_id.setAccessibleName("Telegram chat ID")
         telegram.addWidget(self.entry_chat_id)
-        test = QPushButton("Test connection")
-        test.clicked.connect(self._test_telegram)
-        telegram.addWidget(test)
+        self.find_chat_btn = QPushButton("Find my chat ID")
+        self.find_chat_btn.clicked.connect(self._find_chat_id)
+        telegram.addWidget(self.find_chat_btn)
+        self.test_telegram_btn = QPushButton("Test connection")
+        self.test_telegram_btn.clicked.connect(self._test_telegram)
+        telegram.addWidget(self.test_telegram_btn)
+        self.telegram_status = label("", "MetricLabel")
+        self.telegram_status.setWordWrap(True)
+        telegram.addWidget(self.telegram_status)
         telegram.addStretch()
         body.addWidget(telegram_card, 1)
         root.addLayout(body, 1)
@@ -107,27 +131,75 @@ class SettingsDialog(QDialog):
         self.telegram_card.setVisible(expert)
         for row in self._advanced_rows:
             row.setVisible(expert)
-        self.setMinimumSize(760 if expert else 480, 560)
-        self.resize(800 if expert else 520, 650 if expert else 600)
+        self.setMinimumSize(760 if expert else 480, 680 if expert else 560)
+        self.resize(800 if expert else 520, 720 if expert else 600)
+
+    def _open_telegram_help(self):
+        from .qt_telegram_help import TelegramHelpDialog
+        if self._telegram_help_dialog is None:
+            dialog = TelegramHelpDialog(self)
+            self._telegram_help_dialog = dialog
+            def finished(*_):
+                self._telegram_help_dialog = None
+                dialog.deleteLater()
+            dialog.finished.connect(finished)
+            dialog.open()
+        self._telegram_help_dialog.raise_()
+        self._telegram_help_dialog.activateWindow()
+
+    def _find_chat_id(self):
+        self._run_telegram_action("find")
 
     def _test_telegram(self):
-        from .telegram_bot import send_telegram_message
+        self._run_telegram_action("test")
+
+    def _run_telegram_action(self, action):
         import threading
+        from .telegram_bot import find_private_chat_id, send_test_message, TelegramError
+        if self._telegram_busy:
+            return
         token = self.entry_token.text().strip()
         chat_id = self.entry_chat_id.text().strip()
-        if token and chat_id:
-            t = threading.Thread(
-                target=send_telegram_message, 
-                args=("👋 Hello from Decipline! Your Telegram integration is working perfectly.", token, chat_id),
-                daemon=True
-            )
-            t.start()
-            
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.information(self, "Test Sent", "Test message dispatched! Check your Telegram app.")
+        if not token or (action == "test" and not chat_id):
+            self.telegram_status.setText("Paste your bot token first." if not token else "Click Find my chat ID, or enter your chat ID first.")
+            return
+        self._telegram_busy = True
+        self.find_chat_btn.setEnabled(False)
+        self.test_telegram_btn.setEnabled(False)
+        self.telegram_status.setStyleSheet("")
+        self.telegram_status.setText("Looking for your chat…" if action == "find" else "Sending a test message…")
+        signals = self._telegram_signals
+        def worker():
+            try:
+                value = find_private_chat_id(token) if action == "find" else send_test_message(token, chat_id)
+                result = {"ok": True, "value": value}
+            except TelegramError as error:
+                result = {"ok": False, "message": str(error)}
+            except Exception:
+                result = {"ok": False, "message": "Could not connect to Telegram. Check your details and try again."}
+            try:
+                signals.finished.emit(action, (token, chat_id), result)
+            except RuntimeError:
+                pass  # The user may have closed Settings while the request finished.
+        threading.Thread(target=worker, daemon=True, name="TelegramSetup").start()
+
+    def _telegram_finished(self, action, context, result):
+        self._telegram_busy = False
+        self.find_chat_btn.setEnabled(True)
+        self.test_telegram_btn.setEnabled(True)
+        if (self.entry_token.text().strip() != context[0] or self.entry_chat_id.text().strip() != context[1]):
+            self.telegram_status.setText("Your details changed. Try again with the new details.")
+            return
+        if not result["ok"]:
+            self.telegram_status.setStyleSheet(f"color: {AMBER};")
+            self.telegram_status.setText(result["message"])
+            return
+        self.telegram_status.setStyleSheet(f"color: {GREEN};")
+        if action == "find":
+            self.entry_chat_id.setText(result["value"])
+            self.telegram_status.setText("Chat ID found. Click Test connection, then turn on reminders and save.")
         else:
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.warning(self, "Missing Info", "Please enter both Bot Token and Chat ID to test.")
+            self.telegram_status.setText("Test message sent. Check Telegram, then turn on reminders and save.")
 
     def _save(self):
         self.settings["experience_mode"] = self.mode_combo.currentData()

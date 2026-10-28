@@ -16,6 +16,8 @@ https://github.com/user-attachments/assets/1be4c680-fd23-413f-861b-75337bd8fcf6
 
 ## Start studying
 
+Download the ready-to-use Windows ZIP from [GitHub Releases](https://github.com/Ferdaws-c/Decipline/releases/latest). Extract the ZIP, open the Decipline folder, then double-click **Decipline.exe**. See the [plain-language quick start](QUICK_START.md) for first-time setup and updating an older copy.
+
 1. Open `dist\Decipline\Decipline.exe`. Keep its whole folder together; Python, an AI account, and a network connection are not required for studying or viewing Trends.
 2. Choose **Basic** during setup for the compact interface. You can switch between Basic and Expert in **Settings**.
 3. Select a saved course or use **+** to add one. **General study** works without creating a course. Expand **Lecture** only if you want to attach the session to a particular lecture.
@@ -37,7 +39,7 @@ Use **Manage** beside the course heading to add, view, rename, remove, or restor
 
 The four dots select Pomodoro cycles 1–4. Selecting a dot saves any partial progress and prepares a fresh focus session in that slot. A dot selection does not create study time or a completed Pomodoro.
 
-After a focus countdown finishes, press **Start break**. Cycle 4 gets the configured long break. **Take a break** during focus preserves the unfinished focus countdown; **End break**, then **Resume**, returns to it. A break that finishes naturally also leaves the next study session ready for you to start.
+After a focus countdown finishes, the app shows a completion popup, including when hidden. Press **OK** to start your break; the countdown waits for you. If you dismiss the popup, **Start break** is still available. Cycle 4 gets the configured long break. **Take a break** during focus preserves the unfinished focus countdown; **End break**, then **Resume**, returns to it. A break that finishes naturally also leaves the next study session ready for you to start. Optional Telegram alerts are sent only when a break finishes, never when study time or a free timer finishes.
 
 Focus time, break time, course/lecture attribution, and completed Pomodoros are stored locally. Breaks never count toward study hours or study streaks. Closing the app saves recorded progress. After an interruption, only previously saved time is retained; time while the app was closed is never added.
 
@@ -56,6 +58,12 @@ Expert mode includes a schedule library, manual daily/weekly editing, and JSON i
 The schedule library supports Create, Rename, Delete, and **Edit tasks**. The task editor supports Add, Edit, Delete, and moving tasks up/down, separately for each weekday. Task edits preserve completion state; moving or deleting tasks keeps the active-task position consistent. Library changes are saved atomically, and failed writes report an error while keeping the previously saved data.
 
 In **Schedule library → Edit prompts**, customize daily and weekly instructions and choose **Save prompts**. **Copy prompt** uses your saved instructions for the selected library tab. **Restore default for this tab** edits the draft; save to apply it. Cancel leaves saved prompts unchanged. Telegram notifications are optional and configured in Expert settings.
+
+## Telegram reminders: easy setup
+
+In **Expert mode → Settings → Telegram notifications**, click **How to set up Telegram**. The built-in guide explains how to create a free bot with the verified [@BotFather](https://t.me/BotFather), paste its token, and start a chat with your bot. **Find my chat ID** fills in your recipient number automatically. **Test connection** confirms whether Telegram accepted the test message; then enable reminders and **Save settings**. You can return to Basic mode afterward.
+
+Telegram alerts you only when a break ends. Study completion shows a popup on your computer; press **OK** to start the break. Phone alerts need internet and a running app. Keep your bot token and settings file private. Follow the full [step-by-step instructions](QUICK_START.md#optional-reminders-on-your-phone), based on [Telegram's official bot guide](https://core.telegram.org/bots/tutorial#obtain-your-bot-token).
 
 ## Source and builds
 

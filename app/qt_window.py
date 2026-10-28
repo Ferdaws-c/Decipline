@@ -5,7 +5,7 @@ Replaces the Tkinter/CustomTkinter implementation.
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QLabel, QPushButton, QTableView,
+    QLabel, QPushButton, QTableView, QDialog, QDialogButtonBox,
     QHeaderView, QAbstractItemView, QFrame, QTabWidget, QProgressBar, QStackedWidget, QApplication, QMessageBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QObject
@@ -151,6 +151,7 @@ class MainWindow(QMainWindow):
     def __init__(self, on_hide=None):
         super().__init__()
         self._on_hide = on_hide
+        self._focus_done_popup = None
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
         self.setWindowTitle("Decipline")
         self.resize(1160, 820)
@@ -290,6 +291,7 @@ class MainWindow(QMainWindow):
         self.timer.on_focus_completed = self.signals.focus_completed.emit
         self.timer.on_stats_update = lambda: self.signals.stats_saved.emit(get_courses())
         self.signals.work_done.connect(self._on_work_done)
+        self.signals.tick.connect(self._dismiss_stale_focus_popup)
         self.signals.break_done.connect(self._on_break_done)
         self.signals.free_done.connect(self._on_free_done)
         self.signals.focus_completed.connect(self._on_focus_completed)
@@ -553,20 +555,67 @@ class MainWindow(QMainWindow):
 
     def _on_work_done(self):
         self.basic_panel.sync()
-        self._notify_phase("Focus complete", "Your study time is saved. Start a break when ready.")
+        if self.timer.state == PomodoroState.WAITING_FOR_BREAK:
+            self._show_focus_completion()
+
+    def _show_focus_completion(self):
+        if self._focus_done_popup is not None:
+            return
+        session_id = self.timer.session_id
+        self.restore_from_tray()
+        popup = QDialog(self)
+        popup.setWindowTitle("Study timer complete")
+        popup.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        popup.setWindowModality(Qt.WindowModality.WindowModal)
+        popup.setMinimumWidth(320)
+        layout = QVBoxLayout(popup)
+        layout.setContentsMargins(24, 24, 24, 20)
+        layout.setSpacing(16)
+        title = label("Study timer complete", "SectionTitle")
+        layout.addWidget(title)
+        message = QLabel("Your study time is saved. Take a rest!\nPress OK when you're ready to start your break.")
+        message.setWordWrap(True)
+        layout.addWidget(message)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        buttons.accepted.connect(popup.accept)
+        layout.addWidget(buttons)
+        self._focus_done_popup = popup
+
+        def finished(result):
+            if self._focus_done_popup is popup:
+                self._focus_done_popup = None
+            if (result == QDialog.DialogCode.Accepted
+                    and self.timer.session_id == session_id
+                    and self.timer.state == PomodoroState.WAITING_FOR_BREAK):
+                self.timer.begin_break()
+                self.basic_panel.sync()
+            popup.deleteLater()
+
+        popup.finished.connect(finished)
+        self._play_notification_sound()
+        popup.open()
+        popup.raise_()
+        popup.activateWindow()
+
+    def _dismiss_stale_focus_popup(self, *_):
+        if self._focus_done_popup is not None and self.timer.state != PomodoroState.WAITING_FOR_BREAK:
+            self._focus_done_popup.reject()
 
     def _on_break_done(self):
         self.basic_panel.sync()
         self._notify_phase("Break complete", "Ready for your next focus session.")
+        from .telegram_bot import notify_async
+        notify_async("Break complete: Ready for your next focus session.")
 
     def _on_free_done(self):
         self.basic_panel.sync()
         self._notify_phase("Timer complete", "Your timer has finished.")
 
-    def _notify_phase(self, title, message):
+    def _play_notification_sound(self):
         if load_settings().get("sound_enabled", True):
             import winsound
             winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
+
+    def _notify_phase(self, title, message):
+        self._play_notification_sound()
         show_notification(title, message)
-        from .telegram_bot import notify_async
-        notify_async(f"{title}: {message}")
